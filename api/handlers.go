@@ -44,78 +44,93 @@ func (a *API) GetUserDetails(w http.ResponseWriter, r *http.Request){
 	json.NewEncoder(w).Encode(user)
 }
 
-type BulkDisbursementRequest struct {
-    Receivers []models.User `json:"receivers"`
-    Amount    float64       `json:"amount"`
+type DisbursementRequest struct {
+	SenderID     string        `json:"sender_id"`
+	Disbursements []Disbursement `json:"disbursements"`
+}
+
+type Disbursement struct {
+	ReceiverID string  `json:"receiver_id"`
+	Amount     float64 `json:"amount"`
 }
 
 func (a *API) DisburseFunds(w http.ResponseWriter, r *http.Request) {
-    var requestBody BulkDisbursementRequest
-	// Obtain sender's ID
-    idString := chi.URLParam(r, "id")
-    senderID, err := uuid.Parse(idString)
-    if err != nil {
-        render.Status(r, http.StatusBadRequest)
-        render.JSON(w, r, map[string]interface{}{"error": "invalid user ID"})
-        return
-    }
+	var requestBody DisbursementRequest
+	idString := chi.URLParam(r, "id") // Retrieve sender ID from URL parameter
+	senderID, err := uuid.Parse(idString)
+	if err != nil {
+		render.Status(r, http.StatusBadRequest)
+		render.JSON(w, r, map[string]interface{}{"error": "invalid user ID"})
+		return
+	}
 
-    // Check sender's balance
-    var senderBalance float64
-    if err := database.DB.QueryRow("SELECT wallet_balance FROM users WHERE id = $1", senderID).Scan(&senderBalance); err != nil {
-        render.Status(r, http.StatusInternalServerError)
-        render.JSON(w, r, map[string]interface{}{"error": "internal server error"})
-        return
-    }
+	// Check sender's balance
+	var senderBalance float64
+	err = database.DB.QueryRow("SELECT wallet_balance FROM users WHERE id = $1", senderID).Scan(&senderBalance)
+	if err != nil {
+		render.Status(r, http.StatusInternalServerError)
+		render.JSON(w, r, map[string]interface{}{"error": "failed to fetch sender's balance"})
+		return
+	}
 
-    if senderBalance < requestBody.Amount*float64(len(requestBody.Receivers)) {
-        render.Status(r, http.StatusBadRequest)
-        render.JSON(w, r, map[string]interface{}{"error": "insufficient balance to carry out transaction"})
-        return
-    }
+	totalAmount := 0.0
 
-    // Start a database transaction
-    tx, err := database.DB.Begin()
-    if err != nil {
-        render.Status(r, http.StatusInternalServerError)
-        render.JSON(w, r, map[string]interface{}{"error": "internal server error"})
-        return
-    }
-    defer tx.Rollback()
+	// Validate disbursements and calculate total amount
+	for _, d := range requestBody.Disbursements {
+		if d.Amount <= 0 {
+			render.Status(r, http.StatusBadRequest)
+			render.JSON(w, r, map[string]interface{}{"error": "invalid amount for disbursement"})
+			return
+		}
+		totalAmount += d.Amount
+	}
 
-    // Process receivers
-    for _, receiver := range requestBody.Receivers {
-        // Update receiver's balance
-        receiver.WalletBalance += requestBody.Amount
-        _, err := tx.Exec("UPDATE users SET wallet_balance = $1 WHERE id = $2", receiver.WalletBalance, receiver.ID)
-        if err != nil {
-            render.Status(r, http.StatusInternalServerError)
-            render.JSON(w, r, map[string]interface{}{"error": "internal server error"})
-            return
-        }
-    }
+	if senderBalance < totalAmount {
+		render.Status(r, http.StatusBadRequest)
+		render.JSON(w, r, map[string]interface{}{"error": "insufficient balance to carry out transaction"})
+		return
+	}
 
-    // Update sender's balance
-    senderBalance -= requestBody.Amount * float64(len(requestBody.Receivers))
-    _, err = tx.Exec("UPDATE users SET wallet_balance = $1 WHERE id = $2", senderBalance, senderID)
-    if err != nil {
-        render.Status(r, http.StatusInternalServerError)
-        render.JSON(w, r, map[string]interface{}{"error": "internal server error"})
-        return
-    }
+	// Start a database transaction
+	tx, err := database.DB.Begin()
+	if err != nil {
+		render.Status(r, http.StatusInternalServerError)
+		render.JSON(w, r, map[string]interface{}{"error": "failed to start transaction"})
+		return
+	}
+	defer tx.Rollback()
 
-    // Commit transaction
-    if err := tx.Commit(); err != nil {
-        render.Status(r, http.StatusInternalServerError)
-        render.JSON(w, r, map[string]interface{}{"error": "internal server error"})
-        return
-    }
+	// Process disbursements
+	for _, d := range requestBody.Disbursements {
+		// Update receiver's balance
+		_, err := tx.Exec("UPDATE users SET wallet_balance = wallet_balance + $1 WHERE id = $2", d.Amount, d.ReceiverID)
+		if err != nil {
+			render.Status(r, http.StatusInternalServerError)
+			render.JSON(w, r, map[string]interface{}{"error": "failed to update receiver's balance"})
+			return
+		}
+	}
 
-    // Respond with success message
-    render.Status(r, http.StatusOK)
-    render.JSON(w, r, map[string]interface{}{
-		"message": "Funds disbursed successfully!",
-		"total_amount":	totalAmount,
-		"total_disbursements":	len(requestBody.Disbursements),
-	})
+	// Update sender's balance
+	_, err = tx.Exec("UPDATE users SET wallet_balance = wallet_balance - $1 WHERE id = $2", totalAmount, senderID)
+	if err != nil {
+		render.Status(r, http.StatusInternalServerError)
+		render.JSON(w, r, map[string]interface{}{"error": "failed to update sender's balance"})
+		return
+	}
+
+	// Commit transaction
+	if err := tx.Commit(); err != nil {
+		render.Status(r, http.StatusInternalServerError)
+		render.JSON(w, r, map[string]interface{}{"error": "failed to commit transaction"})
+		return
+	}
+
+	// Respond with success message
+	render.Status(r, http.StatusOK)
+	render.JSON(w, r, map[string]interface{}{
+        "message": "Funds disbursed successfully!",
+        "total_amount": totalAmount,
+        "total_disbursements": len(requestBody.Disbursements),
+    })
 }
