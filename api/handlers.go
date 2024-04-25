@@ -45,7 +45,6 @@ func (a *API) GetUserDetails(w http.ResponseWriter, r *http.Request){
 }
 
 type DisbursementRequest struct {
-	SenderID     string        `json:"sender_id"`
 	Disbursements []Disbursement `json:"disbursements"`
 }
 
@@ -56,17 +55,26 @@ type Disbursement struct {
 
 func (a *API) DisburseFunds(w http.ResponseWriter, r *http.Request) {
 	var requestBody DisbursementRequest
-	idString := chi.URLParam(r, "id") // Retrieve sender ID from URL parameter
+	idString := chi.URLParam(r, "userID") // Retrieve sender ID from URL parameter
 	senderID, err := uuid.Parse(idString)
+    fmt.Println("This is the sender's id", senderID)
 	if err != nil {
 		render.Status(r, http.StatusBadRequest)
 		render.JSON(w, r, map[string]interface{}{"error": "invalid user ID"})
 		return
 	}
 
+	// Decode the request body
+	if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+		render.Status(r, http.StatusBadRequest)
+		render.JSON(w, r, map[string]interface{}{"error": "invalid request body"})
+		return
+	}
+
 	// Check sender's balance
 	var senderBalance float64
 	err = database.DB.QueryRow("SELECT wallet_balance FROM users WHERE id = $1", senderID).Scan(&senderBalance)
+    fmt.Println("This is the sender's balance", senderBalance)
 	if err != nil {
 		render.Status(r, http.StatusInternalServerError)
 		render.JSON(w, r, map[string]interface{}{"error": "failed to fetch sender's balance"})
@@ -104,7 +112,9 @@ func (a *API) DisburseFunds(w http.ResponseWriter, r *http.Request) {
 	for _, d := range requestBody.Disbursements {
 		// Update receiver's balance
 		_, err := tx.Exec("UPDATE users SET wallet_balance = wallet_balance + $1 WHERE id = $2", d.Amount, d.ReceiverID)
+        fmt.Println(d.Amount)
 		if err != nil {
+            fmt.Println("This is the err :", err)
 			render.Status(r, http.StatusInternalServerError)
 			render.JSON(w, r, map[string]interface{}{"error": "failed to update receiver's balance"})
 			return
@@ -126,11 +136,11 @@ func (a *API) DisburseFunds(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Respond with success message
+	// Respond with success message and total amount disbursed
 	render.Status(r, http.StatusOK)
 	render.JSON(w, r, map[string]interface{}{
-        "message": "Funds disbursed successfully!",
-        "total_amount": totalAmount,
-        "total_disbursements": len(requestBody.Disbursements),
-    })
+		"message":             "Funds disbursed successfully!",
+		"total_amount":        totalAmount,
+		"total_disbursements": len(requestBody.Disbursements),
+	})
 }
