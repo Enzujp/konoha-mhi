@@ -9,5 +9,6 @@ import (
 func (a *API) UserRoutes(router chi.Router) http.Handler {
 	router.Get("/{userID}", a.GetUserDetails)
 	router.Post("/{userID}/disburse", a.DisburseFunds)
+	router.Get("/{transactionID}", a.GetTransactionDetails)
 	return router
 }

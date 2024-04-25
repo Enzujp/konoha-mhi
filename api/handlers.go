@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -108,8 +109,11 @@ func (a *API) DisburseFunds(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback()
 
-	// Process disbursements
+	// Process disbursements and log transactions
+    transactionIDs  := make(map[string]string)
 	for _, d := range requestBody.Disbursements {
+        transactionID := uuid.New().String()
+
 		// Update receiver's balance
 		_, err := tx.Exec("UPDATE users SET wallet_balance = wallet_balance + $1 WHERE id = $2", d.Amount, d.ReceiverID)
         fmt.Println(d.Amount)
@@ -119,6 +123,17 @@ func (a *API) DisburseFunds(w http.ResponseWriter, r *http.Request) {
 			render.JSON(w, r, map[string]interface{}{"error": "failed to update receiver's balance"})
 			return
 		}
+
+        // Insert transaction record into database
+        _, err = tx.Exec("INSERT INTO transactions (id, sender_id, receiver_id, amount, timestamp) VALUES($1, $2, $3, $4, $5)", transactionID, senderID, d.ReceiverID, d.Amount, time.Now())
+        if err != nil {
+            render.Status(r, http.StatusInternalServerError)
+            render.JSON(w, r, map[string]interface{}{"error": "failed to log transaction"})
+            fmt.Println("This is the error", err)
+            return
+        }
+        // Populate map with transactionID
+        transactionIDs[d.ReceiverID] = transactionID
 	}
 
 	// Update sender's balance
@@ -140,7 +155,45 @@ func (a *API) DisburseFunds(w http.ResponseWriter, r *http.Request) {
 	render.Status(r, http.StatusOK)
 	render.JSON(w, r, map[string]interface{}{
 		"message":             "Funds disbursed successfully!",
-		"total_amount":        totalAmount,
-		"total_disbursements": len(requestBody.Disbursements),
+		"total_amount":         totalAmount,
+		"total_disbursements":  len(requestBody.Disbursements),
+        "disbursements":        getDisbursementDetails(requestBody.Disbursements),
+        "balance_before":       senderBalance,
+        "balance_after":        senderBalance - totalAmount,
+        "transaction_id":       transactionIDs,        
 	})
+}
+
+func getDisbursementDetails(disbursements []Disbursement) []map[string]interface{} {
+    var details []map[string]interface{}
+    for _, d := range disbursements {
+        detail := map[string]interface{}{
+            "receiver_id": d.ReceiverID,
+            "amount_sent": d.Amount,
+        }
+        details = append(details, detail)
+    }
+    return details
+}
+
+
+func (a *API) GetTransactionDetails(w http.ResponseWriter, r *http.Request) {
+    var transaction models.Transaction
+    idString := chi.URLParam(r, "transactionID")
+    id, err := uuid.Parse(idString)
+    if err != nil{
+        render.Status(r, http.StatusBadRequest)
+        render.JSON(w, r, map[string]interface{}{"error": "invalid ID"})
+        return
+    }
+    err = database.DB.QueryRow("SELECT transaction_id, sender_id, receiver_id, amount, timestamp FROM transactions WHERE id = $1", id).Scan(&transaction.TransactionID, &transaction.SenderID, &transaction.ReceiverID, &transaction.Amount, &transaction.Timestamp)
+    if err != nil {
+        render.Status(r, http.StatusInternalServerError)
+        render.JSON(w, r, map[string]interface{}{"error": "internal server error"})
+        return
+    }
+    render.Status(r, http.StatusOK)
+    render.JSON(w, r, map[string]interface{}{
+        "transaction_details": transaction,
+    })
 }
