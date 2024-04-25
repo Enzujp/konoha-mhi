@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"encoding/json"
 
 	"github.com/enzujp/konoha-mhi/database"
 	"github.com/enzujp/konoha-mhi/models"
@@ -16,35 +17,25 @@ import (
 
 func (a *API) GetUserDetails(w http.ResponseWriter, r *http.Request) {
 	// Obtain userID from request parameters
-	idString := chi.URLParam(r, "id")
-	id, err := uuid.Parse(idString)
-	if err != nil {
-		renderStatusError(r, w, http.StatusBadRequest, "Invalid ID")
-		return
-	}
+	id := chi.URLParam(r, "userID")
 
 	var user models.User
 	// Search database for user
-	err = database.DB.QueryRow("SELECT id, first_name, last_name, email, wallet_balance FROM users WHERE id = $1", id).Scan(&user.ID, &user.FirstName, &user.LastName, &user.Email, &user.WalletBalance)
+	err := database.DB.QueryRow("SELECT id, first_name, last_name, email, wallet_balance FROM users WHERE id = $1", id).Scan(&user.ID, &user.FirstName, &user.LastName, &user.Email, &user.WalletBalance)
 	if err != nil {
 		// If row does not exist
 		if err == sql.ErrNoRows {
 			renderStatusError(r, w, http.StatusNotFound, "User not found")
 			return
 		}
-		fmt.Println("Error querying row:", err)
 		renderStatusError(r, w, http.StatusInternalServerError, "Internal server error")
 		return
 	}
 
 	render.Status(r, http.StatusOK)
-	render.JSON(w, r, user)
+	render.JSON(w, r, user)	
 }
 
-
-type DisbursementRequest struct {
-	Disbursements []Disbursement `json:"disbursements"`
-}
 
 type Disbursement struct {
 	ReceiverID string  `json:"user_id"`
@@ -52,18 +43,18 @@ type Disbursement struct {
 }
 
 func (a *API) DisburseFunds(w http.ResponseWriter, r *http.Request) {
-	var requestBody DisbursementRequest
+	var requestBody []Disbursement
+
+	// Decode the request body
+	if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+		renderStatusError(r, w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
 
 	// Retrieve sender ID from URL parameter
 	senderID, err := getSenderIDFromRequest(r)
 	if err != nil {
 		renderStatusError(r, w, http.StatusBadRequest, ErrInvalidUserID)
-		return
-	}
-
-	// Decode the request body
-	if err := decodeRequestBody(r, &requestBody); err != nil {
-		renderStatusError(r, w, http.StatusBadRequest, ErrInvalidRequestBody)
 		return
 	}
 
@@ -77,7 +68,7 @@ func (a *API) DisburseFunds(w http.ResponseWriter, r *http.Request) {
 	totalAmount := 0.0
 
 	// Validate disbursements and calculate total amount
-	for _, d := range requestBody.Disbursements {
+	for _, d := range requestBody {
 		if d.Amount <= 0 {
 			renderStatusError(r, w, http.StatusBadRequest, ErrInvalidAmount)
 			return
@@ -99,9 +90,9 @@ func (a *API) DisburseFunds(w http.ResponseWriter, r *http.Request) {
 	defer tx.Rollback()
 
 	// Process disbursements and log transactions
-    transactionIDs  := make(map[string]string)
-	for _, d := range requestBody.Disbursements {
-        transactionID := uuid.New().String()
+	transactionIDs := make(map[string]string)
+	for _, d := range requestBody {
+		transactionID := uuid.New().String()
 		// Update receiver's balance
 		_, err := tx.Exec("UPDATE users SET wallet_balance = wallet_balance + $1 WHERE id = $2", d.Amount, d.ReceiverID)
 		if err != nil {
@@ -112,12 +103,11 @@ func (a *API) DisburseFunds(w http.ResponseWriter, r *http.Request) {
 		// Insert transaction record into database
 		_, err = tx.Exec("INSERT INTO transactions (id, sender_id, receiver_id, amount, timestamp) VALUES($1, $2, $3, $4, $5)", transactionID, senderID, d.ReceiverID, d.Amount, time.Now())
 		if err != nil {
-            fmt.Println("This is the err :", err)
 			renderStatusError(r, w, http.StatusInternalServerError, ErrFailedToLogTransaction)
 			return
 		}
-        // Populate map with transactionID
-        transactionIDs[d.ReceiverID] = transactionID
+		// Populate map with transactionID
+		transactionIDs[d.ReceiverID] = transactionID
 	}
 
 	// Update sender's balance
@@ -136,16 +126,15 @@ func (a *API) DisburseFunds(w http.ResponseWriter, r *http.Request) {
 	// Respond with success message and total amount disbursed
 	render.Status(r, http.StatusOK)
 	render.JSON(w, r, map[string]interface{}{
-		"message":            "Funds disbursed successfully!",
-		"total_amount":       totalAmount,
-		"total_disbursements": len(requestBody.Disbursements),
-        "disbursements":        getDisbursementDetails(requestBody.Disbursements),
-        "balance_before":       senderBalance,
-        "balance_after":        senderBalance - totalAmount,
-        "transaction_id":       transactionIDs,
+		"message":              "Funds disbursed successfully!",
+		"total_amount":         totalAmount,
+		"total_disbursements":  len(requestBody),
+		"disbursements":        requestBody,
+		"balance_before":       senderBalance,
+		"balance_after":        senderBalance - totalAmount,
+		"transaction_id":       transactionIDs,
 	})
 }
-
 
 func getSenderBalance(senderID uuid.UUID) (float64, error) {
 	var senderBalance float64
@@ -153,23 +142,9 @@ func getSenderBalance(senderID uuid.UUID) (float64, error) {
 	return senderBalance, err
 }
 
-
 func getSenderIDFromRequest(r *http.Request) (uuid.UUID, error) {
 	idString := chi.URLParam(r, "userID")
 	return uuid.Parse(idString)
-}
-
-
-func getDisbursementDetails(disbursements []Disbursement) []map[string]interface{} {
-    var details []map[string]interface{}
-    for _, d := range disbursements {
-        detail := map[string]interface{}{
-            "receiver_id": d.ReceiverID,
-            "amount_sent": d.Amount,
-        }
-        details = append(details, detail)
-    }
-    return details
 }
 
 // Fetches transaction details using transactionID
@@ -184,7 +159,7 @@ func (a *API) GetTransactionDetails(w http.ResponseWriter, r *http.Request) {
     }
     err = database.DB.QueryRow("SELECT id, sender_id, receiver_id, amount, timestamp FROM transactions WHERE id = $1", id).Scan(&transaction.TransactionID, &transaction.SenderID, &transaction.ReceiverID, &transaction.Amount, &transaction.Timestamp)
     if err != nil {
-        fmt.Println("This is the error", err)
+        fmt.Println("This is the error, here?", err)
         render.Status(r, http.StatusInternalServerError)
         render.JSON(w, r, map[string]interface{}{"error": "internal server error"})
         return

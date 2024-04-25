@@ -4,8 +4,6 @@ import (
 	"fmt"
 	"net/http"
 	"time"
-	"encoding/json"
-
 	"github.com/enzujp/konoha-mhi/config"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/middleware"
@@ -46,8 +44,8 @@ func (a *API) CustomHandler() http.Handler{
 			MaxAge: 300,
 		}),	
 	)
-	router.Get("/", Home)
 	router.Mount("/users", a.UserRoutes(router))
+	router.Get("/", Home)
 	return router
 }
 
@@ -56,6 +54,7 @@ func Home(w http.ResponseWriter, r *http.Request) {
 }
 
 
-func decodeRequestBody(r *http.Request, v interface{}) error {
-	return json.NewDecoder(r.Body).Decode(v)
-}
+// func decodeRequestBody(r *http.Request, v interface{}) error {
+// 	return json.NewDecoder(r.Body).Decode(v)
+// }
+

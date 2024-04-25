@@ -7,8 +7,9 @@ import (
 
 
 func (a *API) UserRoutes(router chi.Router) http.Handler {
-	router.Get("/{userID}", a.GetUserDetails)
-	router.Post("/{userID}/disburse", a.DisburseFunds)
-	router.Get("/{transactionID}", a.GetTransactionDetails)
-	return router
+	userRouter := chi.NewRouter()
+	userRouter.Post("/{userID}/disburse", a.DisburseFunds)
+	userRouter.Get("/details/{userID}", a.GetUserDetails)
+	userRouter.Get("/{transactionID}", a.GetTransactionDetails)
+	return userRouter
 }
