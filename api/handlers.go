@@ -2,7 +2,6 @@ package api
 
 import (
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"time"
@@ -15,13 +14,12 @@ import (
 	"github.com/go-chi/render"
 )
 
-func (a *API) GetUserDetails(w http.ResponseWriter, r *http.Request){
+func (a *API) GetUserDetails(w http.ResponseWriter, r *http.Request) {
 	// Obtain userID from request parameters
 	idString := chi.URLParam(r, "id")
 	id, err := uuid.Parse(idString)
 	if err != nil {
-		render.Status(r, http.StatusBadRequest)
-		render.JSON(w, r, map[string]interface{}{"error": "Invalid ID"})
+		renderStatusError(r, w, http.StatusBadRequest, "Invalid ID")
 		return
 	}
 
@@ -31,54 +29,48 @@ func (a *API) GetUserDetails(w http.ResponseWriter, r *http.Request){
 	if err != nil {
 		// If row does not exist
 		if err == sql.ErrNoRows {
-			render.Status(r, http.StatusNotFound)
-			render.JSON(w, r, map[string]interface{}{"error": "User not found"})
+			renderStatusError(r, w, http.StatusNotFound, "User not found")
 			return
 		}
 		fmt.Println("Error querying row:", err)
-		render.Status(r, http.StatusInternalServerError)
-		render.JSON(w, r, (map[string]interface{}{"error": "internal server error"}))
+		renderStatusError(r, w, http.StatusInternalServerError, "Internal server error")
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(user)
+	render.Status(r, http.StatusOK)
+	render.JSON(w, r, user)
 }
+
 
 type DisbursementRequest struct {
 	Disbursements []Disbursement `json:"disbursements"`
 }
 
 type Disbursement struct {
-	ReceiverID string  `json:"receiver_id"`
+	ReceiverID string  `json:"user_id"`
 	Amount     float64 `json:"amount"`
 }
 
 func (a *API) DisburseFunds(w http.ResponseWriter, r *http.Request) {
 	var requestBody DisbursementRequest
-	idString := chi.URLParam(r, "userID") // Retrieve sender ID from URL parameter
-	senderID, err := uuid.Parse(idString)
-    fmt.Println("This is the sender's id", senderID)
+
+	// Retrieve sender ID from URL parameter
+	senderID, err := getSenderIDFromRequest(r)
 	if err != nil {
-		render.Status(r, http.StatusBadRequest)
-		render.JSON(w, r, map[string]interface{}{"error": "invalid user ID"})
+		renderStatusError(r, w, http.StatusBadRequest, ErrInvalidUserID)
 		return
 	}
 
 	// Decode the request body
-	if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
-		render.Status(r, http.StatusBadRequest)
-		render.JSON(w, r, map[string]interface{}{"error": "invalid request body"})
+	if err := decodeRequestBody(r, &requestBody); err != nil {
+		renderStatusError(r, w, http.StatusBadRequest, ErrInvalidRequestBody)
 		return
 	}
 
 	// Check sender's balance
-	var senderBalance float64
-	err = database.DB.QueryRow("SELECT wallet_balance FROM users WHERE id = $1", senderID).Scan(&senderBalance)
-    fmt.Println("This is the sender's balance", senderBalance)
+	senderBalance, err := getSenderBalance(senderID)
 	if err != nil {
-		render.Status(r, http.StatusInternalServerError)
-		render.JSON(w, r, map[string]interface{}{"error": "failed to fetch sender's balance"})
+		renderStatusError(r, w, http.StatusInternalServerError, ErrFailedToFetchBalance)
 		return
 	}
 
@@ -87,24 +79,21 @@ func (a *API) DisburseFunds(w http.ResponseWriter, r *http.Request) {
 	// Validate disbursements and calculate total amount
 	for _, d := range requestBody.Disbursements {
 		if d.Amount <= 0 {
-			render.Status(r, http.StatusBadRequest)
-			render.JSON(w, r, map[string]interface{}{"error": "invalid amount for disbursement"})
+			renderStatusError(r, w, http.StatusBadRequest, ErrInvalidAmount)
 			return
 		}
 		totalAmount += d.Amount
 	}
 
 	if senderBalance < totalAmount {
-		render.Status(r, http.StatusBadRequest)
-		render.JSON(w, r, map[string]interface{}{"error": "insufficient balance to carry out transaction"})
+		renderStatusError(r, w, http.StatusBadRequest, ErrInsufficientBalance)
 		return
 	}
 
 	// Start a database transaction
 	tx, err := database.DB.Begin()
 	if err != nil {
-		render.Status(r, http.StatusInternalServerError)
-		render.JSON(w, r, map[string]interface{}{"error": "failed to start transaction"})
+		renderStatusError(r, w, http.StatusInternalServerError, ErrFailedToStartTransaction)
 		return
 	}
 	defer tx.Rollback()
@@ -113,25 +102,20 @@ func (a *API) DisburseFunds(w http.ResponseWriter, r *http.Request) {
     transactionIDs  := make(map[string]string)
 	for _, d := range requestBody.Disbursements {
         transactionID := uuid.New().String()
-
 		// Update receiver's balance
 		_, err := tx.Exec("UPDATE users SET wallet_balance = wallet_balance + $1 WHERE id = $2", d.Amount, d.ReceiverID)
-        fmt.Println(d.Amount)
 		if err != nil {
-            fmt.Println("This is the err :", err)
-			render.Status(r, http.StatusInternalServerError)
-			render.JSON(w, r, map[string]interface{}{"error": "failed to update receiver's balance"})
+			renderStatusError(r, w, http.StatusInternalServerError, ErrFailedToUpdateReceiver)
 			return
 		}
 
-        // Insert transaction record into database
-        _, err = tx.Exec("INSERT INTO transactions (id, sender_id, receiver_id, amount, timestamp) VALUES($1, $2, $3, $4, $5)", transactionID, senderID, d.ReceiverID, d.Amount, time.Now())
-        if err != nil {
-            render.Status(r, http.StatusInternalServerError)
-            render.JSON(w, r, map[string]interface{}{"error": "failed to log transaction"})
-            fmt.Println("This is the error", err)
-            return
-        }
+		// Insert transaction record into database
+		_, err = tx.Exec("INSERT INTO transactions (id, sender_id, receiver_id, amount, timestamp) VALUES($1, $2, $3, $4, $5)", transactionID, senderID, d.ReceiverID, d.Amount, time.Now())
+		if err != nil {
+            fmt.Println("This is the err :", err)
+			renderStatusError(r, w, http.StatusInternalServerError, ErrFailedToLogTransaction)
+			return
+		}
         // Populate map with transactionID
         transactionIDs[d.ReceiverID] = transactionID
 	}
@@ -139,30 +123,42 @@ func (a *API) DisburseFunds(w http.ResponseWriter, r *http.Request) {
 	// Update sender's balance
 	_, err = tx.Exec("UPDATE users SET wallet_balance = wallet_balance - $1 WHERE id = $2", totalAmount, senderID)
 	if err != nil {
-		render.Status(r, http.StatusInternalServerError)
-		render.JSON(w, r, map[string]interface{}{"error": "failed to update sender's balance"})
+		renderStatusError(r, w, http.StatusInternalServerError, ErrFailedToUpdateSender)
 		return
 	}
 
 	// Commit transaction
 	if err := tx.Commit(); err != nil {
-		render.Status(r, http.StatusInternalServerError)
-		render.JSON(w, r, map[string]interface{}{"error": "failed to commit transaction"})
+		renderStatusError(r, w, http.StatusInternalServerError, ErrFailedToCommit)
 		return
 	}
 
 	// Respond with success message and total amount disbursed
 	render.Status(r, http.StatusOK)
 	render.JSON(w, r, map[string]interface{}{
-		"message":             "Funds disbursed successfully!",
-		"total_amount":         totalAmount,
-		"total_disbursements":  len(requestBody.Disbursements),
+		"message":            "Funds disbursed successfully!",
+		"total_amount":       totalAmount,
+		"total_disbursements": len(requestBody.Disbursements),
         "disbursements":        getDisbursementDetails(requestBody.Disbursements),
         "balance_before":       senderBalance,
         "balance_after":        senderBalance - totalAmount,
-        "transaction_id":       transactionIDs,        
+        "transaction_id":       transactionIDs,
 	})
 }
+
+
+func getSenderBalance(senderID uuid.UUID) (float64, error) {
+	var senderBalance float64
+	err := database.DB.QueryRow("SELECT wallet_balance FROM users WHERE id = $1", senderID).Scan(&senderBalance)
+	return senderBalance, err
+}
+
+
+func getSenderIDFromRequest(r *http.Request) (uuid.UUID, error) {
+	idString := chi.URLParam(r, "userID")
+	return uuid.Parse(idString)
+}
+
 
 func getDisbursementDetails(disbursements []Disbursement) []map[string]interface{} {
     var details []map[string]interface{}
@@ -176,7 +172,7 @@ func getDisbursementDetails(disbursements []Disbursement) []map[string]interface
     return details
 }
 
-
+// Fetches transaction details using transactionID
 func (a *API) GetTransactionDetails(w http.ResponseWriter, r *http.Request) {
     var transaction models.Transaction
     idString := chi.URLParam(r, "transactionID")
@@ -186,8 +182,9 @@ func (a *API) GetTransactionDetails(w http.ResponseWriter, r *http.Request) {
         render.JSON(w, r, map[string]interface{}{"error": "invalid ID"})
         return
     }
-    err = database.DB.QueryRow("SELECT transaction_id, sender_id, receiver_id, amount, timestamp FROM transactions WHERE id = $1", id).Scan(&transaction.TransactionID, &transaction.SenderID, &transaction.ReceiverID, &transaction.Amount, &transaction.Timestamp)
+    err = database.DB.QueryRow("SELECT id, sender_id, receiver_id, amount, timestamp FROM transactions WHERE id = $1", id).Scan(&transaction.TransactionID, &transaction.SenderID, &transaction.ReceiverID, &transaction.Amount, &transaction.Timestamp)
     if err != nil {
+        fmt.Println("This is the error", err)
         render.Status(r, http.StatusInternalServerError)
         render.JSON(w, r, map[string]interface{}{"error": "internal server error"})
         return

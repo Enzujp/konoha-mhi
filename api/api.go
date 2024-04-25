@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"time"
+	"encoding/json"
 
 	"github.com/enzujp/konoha-mhi/config"
 	"github.com/go-chi/chi/v5"
@@ -52,4 +53,9 @@ func (a *API) CustomHandler() http.Handler{
 
 func Home(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("Annyeonghaseyo, welcome to the homepage!"))
+}
+
+
+func decodeRequestBody(r *http.Request, v interface{}) error {
+	return json.NewDecoder(r.Body).Decode(v)
 }
