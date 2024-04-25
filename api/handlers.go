@@ -169,3 +169,4 @@ func (a *API) GetTransactionDetails(w http.ResponseWriter, r *http.Request) {
         "transaction_details": transaction,
     })
 }
+
